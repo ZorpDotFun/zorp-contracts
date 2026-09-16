@@ -1,0 +1,19 @@
+# Compiler / build
+cache/
+out/
+
+# Broadcast logs (can contain tx metadata)
+broadcast/
+
+# Secrets — never commit keys
+.env
+.env.*
+!.env.example
+
+# Coverage / docs artifacts
+lcov.info
+coverage/
+
+# OS / editor
+.DS_Store
+*.swp
