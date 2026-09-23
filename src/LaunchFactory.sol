@@ -22,6 +22,7 @@ import {LaunchLocker} from "./LaunchLocker.sol";
 import {FeeDistributor} from "./FeeDistributor.sol";
 import {ZorpBuyback} from "./ZorpBuyback.sol";
 import {Arc} from "./constants/Arc.sol";
+import {Robinhood} from "./constants/Robinhood.sol";
 import {LaunchConfig, LaunchParams, FeeConfigLib, TokenMetadataLib} from "./libraries/ZorpTypes.sol";
 import {OpeningPrice} from "./libraries/OpeningPrice.sol";
 import {LaunchPrep} from "./libraries/LaunchPrep.sol";
@@ -59,6 +60,8 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     mapping(address asset => bool) public approvedPairAssets;
     /// @notice Pricing decimals for a pair. `0` means read `decimals()` on the token.
     mapping(address asset => uint8) public pairDecimals;
+    /// @notice Manual USD price (6dp) when no live `usdQuote` pool is set.
+    mapping(address asset => uint256) public pairUsdPrice6;
     address public usdQuote;
     mapping(address asset => PoolKey) public pricePools;
 
@@ -97,10 +100,12 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
     error InvalidPricePool();
     error UsdQuoteUnset();
     error NotTimelock();
+    error InvalidUsdPrice();
 
     event Wired();
     event PairAssetUpdated(address indexed asset, bool approved);
     event PairDecimalsUpdated(address indexed asset, uint8 decimals);
+    event PairUsdPriceUpdated(address indexed asset, uint256 usdPrice6);
     event UsdQuoteUpdated(address quote);
     event PricePoolUpdated(address indexed asset, Currency currency0, Currency currency1);
     event LaunchEnabledUpdated(bool enabled);
@@ -147,7 +152,13 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         locker = locker_;
         buyback = buyback_;
         installer = msg.sender;
-        if (Arc.USDC != address(0) && Arc.USDC.code.length != 0) {
+        if (block.chainid == Robinhood.CHAIN_ID) {
+            LaunchPrep.enablePair(Robinhood.WETH, MIN_PAIR_DECIMALS, MAX_PAIR_DECIMALS);
+            approvedPairAssets[Robinhood.WETH] = true;
+            pairUsdPrice6[Robinhood.WETH] = Robinhood.WETH_USD_6;
+            emit PairAssetUpdated(Robinhood.WETH, true);
+            emit PairUsdPriceUpdated(Robinhood.WETH, Robinhood.WETH_USD_6);
+        } else if (Arc.USDC != address(0) && Arc.USDC.code.length != 0) {
             LaunchPrep.enablePair(Arc.USDC, MIN_PAIR_DECIMALS, MAX_PAIR_DECIMALS);
             approvedPairAssets[Arc.USDC] = true;
             usdQuote = Arc.USDC;
@@ -205,6 +216,18 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         emit UsdQuoteUpdated(quote);
     }
 
+    /// @notice Seed or refresh a pair's USD mark (6dp) for the $3,000 opening FDV.
+    ///         Installer may set this only before `wire()`; afterwards, owner only.
+    function setPairUsdPrice6(address asset, uint256 usdPrice6) external {
+        if (asset == address(0)) revert ZeroAddress();
+        if (usdPrice6 == 0) revert InvalidUsdPrice();
+        if (msg.sender != owner()) {
+            if (msg.sender != installer || wired) revert NotInstaller();
+        }
+        pairUsdPrice6[asset] = usdPrice6;
+        emit PairUsdPriceUpdated(asset, usdPrice6);
+    }
+
     /// @notice Uniswap v4 pool used to read the live USDC price of a pairing asset.
     function setPricePool(address asset, PoolKey calldata key) external onlyOwner {
         if (asset == address(0) || usdQuote == address(0)) revert ZeroAddress();
@@ -257,9 +280,9 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
         FeeConfigLib.validate(config.fees);
         uint8 pricingDecimals =
             LaunchPrep.pairDecimals(config.pairAsset, pairDecimals[config.pairAsset], MIN_PAIR_DECIMALS, MAX_PAIR_DECIMALS);
-        uint256 openingPrice = OpeningPrice.rawPriceUsd(
-            pricingDecimals,
-            LaunchPrep.spotUsdPrice(
+        uint256 usdPrice = pairUsdPrice6[config.pairAsset];
+        if (usdPrice == 0) {
+            usdPrice = LaunchPrep.spotUsdPrice(
                 poolManager,
                 config.pairAsset,
                 pricingDecimals,
@@ -268,8 +291,9 @@ contract LaunchFactory is Ownable2Step, ReentrancyGuard, IUnlockCallback {
                 pairDecimals[usdQuote],
                 MIN_PAIR_DECIMALS,
                 MAX_PAIR_DECIMALS
-            )
-        );
+            );
+        }
+        uint256 openingPrice = OpeningPrice.rawPriceUsd(pricingDecimals, usdPrice);
 
         token = _deployToken(params);
         LaunchToken(token).setMetadata(params.metadata);

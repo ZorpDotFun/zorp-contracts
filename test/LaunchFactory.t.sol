@@ -138,6 +138,23 @@ contract LaunchFactoryTest is Test {
         factory.launchToken(_params(address(stock), 0, bytes32(uint256(10))));
     }
 
+    function test_manualUsdPriceOpensAt3kWithoutPricePool() public {
+        MockERC20 weth = new MockERC20("Wrapped Ether", "WETH", 18);
+        factory.setPairAsset(address(weth), true);
+        factory.setPairUsdPrice6(address(weth), 3_000e6);
+        (address token,) = factory.launchToken(_params(address(weth), 0, bytes32(uint256(12))));
+        (,,,,, uint256 openingPrice,,,,,) = factory.launches(token);
+        assertEq(openingPrice, OpeningPrice.rawPriceUsd(18, 3_000e6));
+        assertEq(openingPrice, 1e9);
+    }
+
+    function test_strangerCannotSetPairUsdPrice() public {
+        MockERC20 weth = new MockERC20("Wrapped Ether", "WETH", 18);
+        vm.prank(address(0xB0B));
+        vm.expectRevert(LaunchFactory.NotInstaller.selector);
+        factory.setPairUsdPrice6(address(weth), 3_000e6);
+    }
+
     function test_usdcLaunchRequiresUsdQuote() public {
         IPoolManager pm = IPoolManager(address(manager));
         TestLaunchHook h2 = new TestLaunchHook(pm, address(this));
